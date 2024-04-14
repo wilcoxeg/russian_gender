@@ -1,0 +1,38 @@
+.DS_Store
+node_modules
+/dist
+__pycache__
+
+# local env files
+.env.local
+.env.*.local
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# models
+bayesian_models_cor/
+bayesian_models_lc/
+bayesian_models_surp/
+provo_temp/
+reading_measures/
+divided/
+preprocessed_trialData/
+metadata/
+processed_trial/
+fixations/
+reading_measures/
+raw_data/
+ref/
+model/
