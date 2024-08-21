@@ -1,0 +1,983 @@
+---
+title: "Analysis for Russian ET Reading Data"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r libraries, echo=TRUE, results='hide', warning=FALSE, message=FALSE, eval=TRUE}
+shhh <- suppressPackageStartupMessages # It's a library, so shhh!
+
+shhh(library( mgcv ))
+shhh(library(dplyr))
+shhh(library(ggplot2))
+shhh(library(lme4))
+shhh(library(tidymv))
+shhh(library(gamlss))
+shhh(library(gsubfn))
+shhh(library(lmerTest))
+shhh(library(tidyverse))
+shhh(library(boot))
+shhh(library(rsample))
+shhh(library(plotrix))
+shhh(library(ggrepel))
+shhh(library(mgcv))
+shhh(library(brms))
+shhh(library(bayesplot))
+shhh(library(tidyr))
+shhh(library(car))
+shhh(library(HDInterval))
+shhh(library(gridExtra))
+shhh(library(posterior))
+shhh(library(readxl))
+shhh(library(stringr))
+shhh(library(loo))
+
+shhh(library(coda))
+shhh(library(cmdstanr))
+shhh(library(rstan))
+shhh(library(rstantools))
+
+rstan_options(auto_write=TRUE)
+options(mc.cores=parallel::detectCores())
+rstan_options(auto_write = TRUE)
+theme_set(theme_bw())
+options(digits=4)
+options(scipen=999)
+set.seed(444)
+
+```
+
+# Read in ET Data
+```{r ET-Data, echo=TRUE, warning=FALSE, eval=TRUE}
+file_list <- list.files("/Users/cui/Documents/uzh/PhD/Projects/Russian_Agreement/russian_gender/ref/Eyetracking/", pattern = "*.xlsx", full.names = TRUE)
+et_raw <- file_list %>%
+  lapply(read_excel) %>%
+  bind_rows()
+
+View(et_raw)
+```
+
+```{r}
+et <- et_raw %>%
+  dplyr::select(IA_LABEL, item, word.id, list, RECORDING_SESSION_LABEL, SFD, IA_DWELL_TIME, IA_FIRST_RUN_DWELL_TIME, IA_FIRST_FIX_PROGRESSIVE, IA_SELECTIVE_REGRESSION_PATH_DURATION, IA_REGRESSION_OUT, IA_REGRESSION_IN, gender_match, part, target_gender, type, Region, condition) %>%
+  rename(
+    word = IA_LABEL,
+    item_id = item,
+    word_nr = word.id,
+    subj_id = RECORDING_SESSION_LABEL,
+    total_duration = IA_DWELL_TIME,
+    gaze_duration = IA_FIRST_RUN_DWELL_TIME,
+    first_pass_fix = IA_FIRST_FIX_PROGRESSIVE,
+    go_past_time = IA_SELECTIVE_REGRESSION_PATH_DURATION,
+    FPReg = IA_REGRESSION_OUT,
+    RegIn = IA_REGRESSION_IN,
+    AOI_id = Region
+  ) %>%
+  mutate(
+    go_past_time = as.numeric(go_past_time),
+    SFD = if_else(first_pass_fix == 1, SFD, 0),
+    gaze_duration = if_else(first_pass_fix == 1, gaze_duration, 0),
+    go_past_time = if_else(first_pass_fix == 1,  go_past_time, 0)
+  ) %>%
+  rename(FPFix = first_pass_fix) %>%
+  filter(! list %in% c(98, 99)) %>% # filter practice and filler items
+  mutate(
+         FPReg = ifelse(gaze_duration==0, NA, FPReg),
+         FPFix = ifelse(gaze_duration==0, NA, FPFix)) %>%
+  
+  gather(measure, value, 6:12) %>%
+
+  mutate(
+    value = as.numeric(value),
+    tgt_zero = if_else(measure %in% c("SFD", "gaze_duration", "go_past_time", "total_duration") & value == 0, F, T)) %>%
+  filter(tgt_zero != F) %>%
+  dplyr::select(-tgt_zero, -condition) %>%
+  mutate(item_id = as.factor(item_id),
+         subj_id = as.factor(subj_id)) %>%
+  spread(measure, value) %>%
+  gather(measure, value, c("SFD", "gaze_duration", "go_past_time", "total_duration")) %>%
+  mutate(outlier = value > (mean(value, na.rm = TRUE) + 3 * sd(value, na.rm = TRUE))) %>%
+  filter(outlier == FALSE) %>%
+  dplyr::select(-outlier) %>%
+  spread(measure, value) %>%
+  gather(measure, value, 11:17) %>%
+  mutate(cond = case_when(
+    target_gender == "M" & gender_match == "Mis" & type == "stim_adj" ~ "a",
+    target_gender == "M" & gender_match == "Mis" & type == "stim_verb" ~ "b",
+     target_gender == "M" & gender_match == "Mis" & type == "stim_pred_adj" ~ "c",
+    target_gender == "M" & gender_match == "Match" & type == "stim_adj" ~ "d",
+    target_gender == "M" & gender_match == "Match" & type == "stim_verb" ~ "e",
+    target_gender == "M" & gender_match == "Match" & type == "stim_pred_adj" ~ "f",
+    target_gender == "F" & gender_match == "Mis" & type == "stim_adj" ~ "g",
+    target_gender == "F" & gender_match == "Mis" & type == "stim_verb" ~ "h",
+    target_gender == "F" & gender_match == "Mis" & type == "stim_pred_adj" ~ "i",
+    target_gender == "F" & gender_match == "Match" & type == "stim_adj" ~ "j",
+    target_gender == "F" & gender_match == "Match" & type == "stim_verb" ~ "k",
+    target_gender == "F" & gender_match == "Match" & type == "stim_pred_adj" ~ "l",
+    TRUE ~ NA_character_ # This is the default case if none of the above conditions are met
+  )) %>%
+    dplyr::select(-list, -part)
+ 
+View(et) 
+```
+### RESEARCH QUESTIONS:
+ 1. Are RTs different in gender-match versus gender-mismatch sentences?
+ ==> main effect of grammaticality (gender match or not)
+ 
+ 2. Are RTs different in Masculine versus Feminine sentence conditions?
+ ==> main effect of gender of target word
+ 
+ 3. Are RTs affected by sentence type (whether different lexical categories of the agreeing element will make the processing more difficult or not)? --> ADJ(adj + pre_adj) v.s. VERB 
+ ==> main effect of lexical type of sentences. 
+ 
+ 4. Are RTs affected by sentence type (whether agreeing element instantiates internal v.s. external agreement will make a difference in processing difficulty)? --> internal (modifying adjective) v.s. external (verb or predicative adjective)
+ ==> main effect of syntax type of sentences.
+ 
+ 5. Does the grammaticality effect within each lexical sentence type differ from each other? --> Whether the effect of grammaticality depends on the lexical type of the sentence (ADJ? VERB?)
+ ==> interaction between grammaticality and lexical sentence type
+ 
+ 6.Does the grammaticality effect within each syntax sentence type differ from each other? --> Whether the effect of grammaticality depends on the syntax type of the sentence (internal? external?)
+ ==> interaction between grammaticality and syntax sentence type
+ 
+ 7. Does the (possible) difference in the sensitivity to the grammaticality manipulation of 
+     Masculine versus Feminine conditions differ between lexical sentence types (ADJ v.s. VERB)?
+ ==> 3-way interaction between grammaticality, gender and lexical sentence type
+ 
+ 8. Does the (possible) difference in the sensitivity to the grammaticality manipulation of 
+     Masculine versus Feminine conditions differ between syntax sentence types (internal v.s. external)?
+ ==> 3-way interaction between grammaticality, gender and syntax sentence type
+
+
+# contrast coding
+```{r factorize, echo=TRUE, eval=TRUE}
+# check conditions
+et$cond <- factor(et$cond)
+summary(et$cond)
+```
+
+
+```{r Contrasts-customized, echo=TRUE, eval=TRUE}
+clean_df <- et %>% 
+  mutate(
+    #--------------------- main effects ---------------------
+    Gram = ifelse(cond %in% c('a', 'b', 'c', 'g', 'h', 'i'), 1/6, -1/6), # Main effect grammaticality 
+    Gen = ifelse(cond %in% c('a','b','c','d','e', 'f'), 1/6, -1/6), # Main effect gender
+    TypL = ifelse(cond %in% c('a','c','d','f', 'g', 'i', 'j', 'l'), 1/8, -1/4), # Main effect of sentence type (ap vs v)
+    TypS = ifelse(cond %in% c('a', 'd', 'g', 'j'), 1/4, -1/8), # Main effect of sentence type (a vs pv)
+    
+    #--------------------- 2 way interection ---------------------
+    # Gram_x_TypL = ifelse(cond %in% c('a', 'c', 'i'), 1/8,
+    #                  ifelse(cond %in% c('d', 'f', 'l'), -1/8,
+    #                    ifelse(cond %in% c('e', 'k'), 1/4, -1/4))), # Grammaticality x type (ap v)
+    
+    # Gram_x_TypS = ifelse(cond %in% c('e', 'f', 'k', 'l'), 1/8,
+    #                   ifelse(cond %in% c('b', 'c', 'h', 'i'), -1/8,
+    #                          ifelse(cond %in% c('a', 'g'), 1/4, -1/4))), # Grammaticality x type (ap v)
+    
+    Gram_x_TypL = ifelse(cond %in% c('a', 'c', 'g', 'i', 'e', 'k'), 1/2, -1/2), # Grammaticality x type (ap v)
+    Gram_x_TypS = ifelse(cond %in% c('a', 'g', 'e', 'f', 'k', 'l'), 1/2, -1/2), # Grammaticality x type (a pv)
+
+    Gram_TypL_M = ifelse(cond %in% c('a', 'c', 'e'), 1/2, 
+                    ifelse(cond %in% c('b', 'd', 'f'), -1/2, 0)), # gram x typl(ap v)_M
+    Gram_TypS_M = ifelse(cond %in% c('a', 'e', 'f'), 1/2, 
+                ifelse(cond %in% c('b', 'c', 'd'), -1/2, 0)), # gram x typs(a pv)_M
+    Gram_TypL_F = ifelse(cond %in% c('g', 'i', 'k'), 1/2, 
+                ifelse(cond %in% c('h', 'j', 'l'), -1/2, 0)), # gram x typl(ap v)_F
+    Gram_TypS_F = ifelse(cond %in% c('a', 'e', 'f'), 1/2, 
+                ifelse(cond %in% c('b', 'c', 'd'), -1/2, 0)), # gram x typs(a pv)_F
+    
+    #--------------------- 3 way interection ---------------------
+    Gram_x_Gen_x_TypL = ifelse(cond %in% c('a', 'c', 'e', 'h', 'j', 'l'), 1/2, -1/2), # gen x typ1(ap v) x gram
+    Gram_x_Gen_x_TypS = ifelse(cond %in% c('a', 'e', 'f', 'h', 'i', 'j'), 1/2, -1/2), # gen x typ1(ap v) x gram
+    
+    #--------------------- Within grammaticality type effects ---------------------
+    Typ_Mis = ifelse(cond %in% c('a', 'c', 'g', 'i'), 1/4,
+              ifelse(cond %in% c('b', 'h'), -1/2, 0)),  # type_Mis
+    Typ_Match = ifelse(cond %in% c('d', 'f', 'j', 'l'), 1/4,
+                  ifelse(cond %in% c('e', 'k'), -1/2, 0))  # type_Match
+  ) %>% spread(measure, value) %>%
+  # filter(word_nr == 3)
+  filter(AOI_id == "R3")
+  
+clean_df
+```
+
+```{r Contrasts-fuchs, echo=TRUE, eval=TRUE}
+clean_df$target_gender <- factor(clean_df$target_gender)    # F, M
+clean_df$gender_match <- factor(clean_df$gender_match)      # Match, Mismatch
+clean_df$type <- factor(clean_df$type)                      # adj, pre_adj, verb
+
+X_C_bar1 <- contr.sum(2)
+X_C_bar2 <- contr.sum(3)
+
+contrasts(clean_df$target_gender)<- X_C_bar1
+contrasts(clean_df$gender_match)<- X_C_bar1
+contrasts(clean_df$type)<- X_C_bar2
+
+## Check contrasts
+# contrasts(clean_df$target_gender)
+# contrasts(clean_df$gender_match)
+# contrasts(clean_df$type)    # The contrast is for: h0 -> grand mean; h1 -> adj-grand mean; h2 -> pre-gran mean
+
+```
+
+
+```{r et_lmer_models, echo=TRUE, eval=FALSE, message=TRUE}
+# View(clean_df)
+stats_df = data.frame()
+measure_types = c("SFD", "gaze_duration", "go_past_time", "total_duration", 
+                  "FPReg", "RegIn")
+
+for (meas in measure_types){
+  print(paste("Fitting model for:", meas))
+  
+  if (meas %in% c("SFD", "gaze_duration", "go_past_time", "total_duration")){
+      model <- clean_df %>% filter(!is.na(.data[[meas]]))  %>% 
+        lmer(as.formula(paste("log(", meas, ") ~ Gram + Gen + TypL + TypS + Gram_x_TypL + Gram_x_TypS + Gram_x_Gen_x_TypL + Gram_x_Gen_x_TypS + 
+            (1 | item_id) + (1 + Gram | subj_id)")), 
+            data = ., REML = F)
+      coefs <- summary(model)$coefficients
+      temp_results <- data.frame(
+        measure = meas,
+        beta = c("b_0", "b_Gram", "b_Gen", "b_TypL", "b_TypS", 
+                 "b_Gram_x_TypL", "b_Gram_x_TypS", "b_Gram_x_Gen_x_TypL", "b_Gram_x_Gen_x_TypS"),
+        bval = coefs[, "Estimate"],
+        pval = coefs[, "Pr(>|t|)"]
+      )
+  }else{
+      model <- clean_df %>% filter(!is.na(.data[[meas]]))  %>% 
+        glmer(as.formula(paste(meas, "~ Gram + Gram_x_TypL + Gram_x_TypS + Gram_x_Gen_x_TypL + Gram_x_Gen_x_TypS + 
+            (1 | item_id) + (1 | subj_id)")), 
+            data = ., family=binomial(link = "logit"))
+      coefs <- summary(model)$coefficients
+      temp_results <- data.frame(
+        measure = meas,
+        beta = c("b_0", "b_Gram", 
+                 "b_Gram_x_TypL", "b_Gram_x_TypS", "b_Gram_x_Gen_x_TypL", "b_Gram_x_Gen_x_TypS"),
+        bval = coefs[, "Estimate"],
+        pval = coefs[, "Pr(>|z|)"]
+        )
+  }
+    stats_df = rbind(stats_df, temp_results)
+}
+
+stats_df = stats_df %>%
+  mutate(sig = if_else(pval < 0.05, "SIG", ifelse(pval < .1, ".", "")))
+
+View(stats_df)
+
+# write.csv(stats_df, "./stats/stats_lmer_et.csv", row.names = FALSE)
+
+```
+
+# Model comparison
+```{r}
+model_comparison_df = data.frame()
+measure_types = c("SFD", "gaze_duration", "go_past_time", "total_duration", 
+                  "FPReg", "RegIn")
+
+for (meas in measure_types){
+  print(paste("Compare models for:", meas))
+    if (meas %in% c("SFD", "gaze_duration", "go_past_time", "total_duration")){
+        model_l <- clean_df %>% filter(!is.na(.data[[meas]])) %>%
+        lmer(as.formula(paste("log(", meas, ") ~  Gram + Gen + TypL  + Gram_x_TypL + Gram_x_Gen_x_TypL + 
+            (1 | item_id) + (1 + Gram | subj_id)")), data = ., REML = F)
+
+        model_s <- clean_df %>% filter(!is.na(.data[["go_past_time"]]))  %>% 
+        lmer(as.formula(paste("log(", meas, ") ~ Gram + Gen + TypS  + Gram_x_TypS + Gram_x_Gen_x_TypS + 
+            (1 | item_id) + (1 + Gram | subj_id)")), data = ., REML = F)
+    }else{
+        model_l <- clean_df %>% filter(!is.na(.data[[meas]]))  %>% 
+        glmer(as.formula(paste(meas, "~ Gram + Gram_x_TypL + Gram_x_Gen_x_TypL +
+            (1 | item_id)")), 
+            data = ., family=binomial(link = "logit"))
+        model_s <- clean_df %>% filter(!is.na(.data[[meas]]))  %>% 
+        glmer(as.formula(paste(meas, "~ Gram + Gram_x_TypS + Gram_x_Gen_x_TypS +
+            (1 | item_id)")), 
+            data = ., family=binomial(link = "logit"))
+    }
+  
+    aic_bic_comparison <- data.frame(
+      `Dependent Variable` = meas,
+      `Model Type` = c("L model", "S model"),
+      AIC = c(AIC(model_l), AIC(model_s)),
+      BIC = c(BIC(model_l), BIC(model_s)))
+    model_comparison_df = rbind(model_comparison_df, aic_bic_comparison)
+}
+
+View(model_comparison_df)
+write.csv(model_comparison_df, "./stats/et_model_comparison_lmer.csv", row.names = FALSE)
+```
+
+# Fit Bayesian models
+# function for creating stan data format
+```{r createStanDat, echo=TRUE, eval=TRUE}
+createStanDat<-function(d, dv,form){
+  
+  subj <- as.integer(factor(d$subj_id))
+  N_subj <- length(unique(subj))
+  item <- as.integer(factor(d$item_id))
+  N_items <- length(unique(item))
+  X <- unname(model.matrix(form, d))  
+  attr(X, which="assign") <- NULL
+  
+  stanDat <- list(N = nrow(X),           
+                  P = ncol(X),              
+                  n_u = ncol(X),             
+                  n_w = ncol(X),            
+                  X = X,                     
+                  Z_u = X,                 
+                  Z_w = X,                   
+                  J = N_subj,                
+                  K = N_items,
+                  dv = dv,                    
+                  subj = subj,
+                  item = item)
+  stanDat
+}
+```
+
+
+```{r stan_gaze_duration, echo=TRUE, eval=False}
+stan_gd <- createStanDat(d=subset(clean_df, !is.na(clean_df$gaze_duration)),
+                             form=as.formula("~1+Gram+Gen+TypL+TypS+Gram_x_TypL+Gram_x_TypS+Gram_x_Gen_x_TypL+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$gaze_duration))$gaze_duration)
+
+m1_gd <- stan(file = "stan/maxModel1.stan", 
+                data = stan_gd,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+saveRDS(m1_gd, file = "model/et_gd.rds")
+```
+
+
+```{r stan_go_past_time, echo=TRUE, eval=False}
+stan_gpt <- createStanDat(d=subset(clean_df, !is.na(clean_df$go_past_time)),
+                             form=as.formula("~1+Gram+Gen+TypL+TypS+Gram_x_TypL+Gram_x_TypS+Gram_x_Gen_x_TypL+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$go_past_time))$go_past_time)
+
+# sample from posterior distribution.
+m1_gpt <- stan(file = "stan/maxModel1.stan", 
+                data = stan_gpt,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+saveRDS(m1_gpt, file = "model/et_gpt.rds")
+```
+
+
+```{r stan_total_duration, echo=TRUE, eval=False}
+stan_td <- createStanDat(d=subset(clean_df, !is.na(clean_df$total_duration)),
+                             form=as.formula("~1+Gram+Gen+TypL+TypS+Gram_x_TypL+Gram_x_TypS+Gram_x_Gen_x_TypL+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$total_duration))$total_duration)
+
+# sample from posterior distribution.
+m1_td <- stan(file = "stan/maxModel1.stan", 
+                data = stan_td,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+saveRDS(m1_td, file = "model/et_td.rds")
+```
+
+# binary dv
+```{r stan_FPReg, echo=TRUE, eval=False}
+stan_fpreg <- createStanDat(d=subset(clean_df, !is.na(clean_df$FPReg)),
+                             form=as.formula("~1+Gram+Gen+TypL+TypS+Gram_x_TypL+Gram_x_TypS+Gram_x_Gen_x_TypL+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$FPReg))$FPReg)
+
+# sample from posterior distribution.
+m1_fpreg <- stan(file = "stan/logitModel1.stan", 
+                data = stan_fpreg,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+saveRDS(m1_fpreg, file = "model/et_fpreg.rds")
+```
+
+
+```{r stan_Regin_incl, echo=TRUE, eval=False}
+stan_regin <- createStanDat(d=subset(clean_df, !is.na(clean_df$RegIn)),
+                             form=as.formula("~1+Gram+Gen+TypL+TypS+Gram_x_TypL+Gram_x_TypS+Gram_x_Gen_x_TypL+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$RegIn))$RegIn)
+
+# sample from posterior distribution.
+m1_regin <- stan(file = "stan/logitModel1.stan", 
+                data = stan_regin,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+saveRDS(m1_regin, file = "model/et_regin.rds")
+```
+
+# compile model results
+```{r compile_restuls, echo=TRUE, eval=TRUE}
+stats_df <- data.frame()
+
+# Define the measure types corresponding to your models
+measure_types <- c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn")
+
+# Loop over each measure type to read the corresponding model and extract data
+for (meas in measure_types) {
+  if (meas == "gaze_duration") {
+      m1 <- readRDS("model/et_gd.rds")
+    } else if (meas == "go_past_time") {
+      m1 <- readRDS("model/et_gpt.rds")
+    } else if (meas == "total_duration") {
+      m1 <- readRDS("model/et_td.rds")
+    } else if (meas == "FPReg") {
+      m1 <- readRDS("model/et_fpreg.rds")
+    } else if (meas == "RegIn") {
+      m1 <- readRDS("model/et_regin.rds")
+    }
+
+  # Extract posterior distributions
+  y_posterior <- extract(m1)
+  intercept <- exp(y_posterior$beta[,1])
+
+  betas <- c("b_0", "b_Gram", "b_Gen", "b_TypL", "b_TypS", "b_Gram_x_TypL", "b_Gram_x_TypS", "b_Gram_x_Gen_x_TypL", "b_Gram_x_Gen_x_TypS")
+  posterior_samples <- list(intercept, y_posterior$Gram, y_posterior$Gen, y_posterior$TypL, y_posterior$TypS, y_posterior$Gram_x_TypL, y_posterior$Gram_x_TypS, y_posterior$Gram_x_Gen_x_TypL, y_posterior$Gram_x_Gen_x_TypS)
+  
+  hpdi_95 <- lapply(posterior_samples, function(x) hdi(x, credMass = 0.95))
+  hpdi_89 <- lapply(posterior_samples, function(x) hdi(x, credMass = 0.89))
+
+  # Prepare the results data frame
+  temp_results <- data.frame(
+    measure = rep(meas, length(betas)),
+    beta = betas,
+    bval_mean = sapply(posterior_samples, mean),
+    crI_95_lower = sapply(posterior_samples, function(x) quantile(x, 0.025)),
+    crI_95_upper = sapply(posterior_samples, function(x) quantile(x, 0.975)),
+    crl_89_lower = sapply(posterior_samples, function(x) quantile(x, 0.055)),
+    crl_89_upper = sapply(posterior_samples, function(x) quantile(x, 0.945)),
+    hpdi_95_lower = sapply(hpdi_95, function(x) x[1]),
+    hpdi_95_upper = sapply(hpdi_95, function(x) x[2]),
+    hpdi_89_lower = sapply(hpdi_89, function(x) x[1]),
+    hpdi_89_upper = sapply(hpdi_89, function(x) x[2]),
+    bval_median = sapply(posterior_samples, median)
+  )
+
+  # Append the temp_results to the stats_df data frame
+  stats_df <- rbind(stats_df, temp_results)
+}
+
+write.csv(stats_df, "./stats/et_stats_bayesian.csv", row.names = FALSE)
+```
+
+### OBSERVATIONS:
+
+gpt, gd, td, reg: 
+
+1. Effects of Grammaticality are always significant. --> There are main effect of grammaticality (gender match or not).
+2. Effects of condTypS are significant or nearly significant. --> Very likely, there are main effect of syntactic agreement type (adj vs verb & pred_adj)
+
+3. The significance of condTypL is always smaller than condTypS. In Bayesian, the crI of beta for TypL (diff between adj vs verb) is always larger and 0 is more to the middle of its distribution.
+* If do sum contrast for each level of type, pred_adj type is significantly different from the grand mean.
+
+4. For gd, the interaction between TypS and Gram is significant. For td and gpt, it is also near to significance (or 0 to be in the narrow tail of its distr. in Bayesian). --> external or internal agreement will affect the process of mismatches in sentence.
+
+5. Interaction between TypL and Gram is far from significance.
+
+6. In td, there are three way interaction between TypL & Gram & Gen. --> coincidence? 
+
+### CONCLUSION:
+
+1. Longer rt and more regressions in error setences.
+2. Longer rt and possibly more regressions in external agreement than internal ones. --> external is more difficult.
+3. But rt difference between mismatch and match is bigger in internal than in external. --> internal agreement kind of amplify the processing difficulty in mismatches. Maybe because external sentences are already difficult, so when combined with errors, the rt is not that different from in correct sentence. Maybe because people have their upboundary for the times they spend on difficult sentences? --> obviously, rt(difficult_external_type + error_sentence) < rt(difficult_external_type_sentence) + rt(error_sentence)
+
+
+# Bayesian model comparison
+```{r compare_go_past_time, echo=TRUE, eval=False}
+# Exclude outlier points 
+
+# Refit the models on the cleaned data
+lexical_gpt_clean <- createStanDat(d=subset(clean_df, !is.na(clean_df$total_duration)),
+                             form=as.formula("~1+Gram+Gen+TypL+Gram_x_TypL+Gram_x_Gen_x_TypL"), 
+                             dv=subset(clean_df, !is.na(clean_df$total_duration))$total_duration)
+
+# lexical_gpt
+# sample from posterior distribution.
+lexical_gpt_clean <- stan(file = "stan/Modelcomparison.stan", 
+                data = lexical_gpt_clean,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99)
+                )
+# saveRDS(lexical_gpt_clean, file = "model/model_comparison/lexical_gpt_clean.rds")
+
+syntax_gpt_clean <- createStanDat(d=subset(clean_df, !is.na(clean_df$total_duration)),
+                             form=as.formula("~1+Gram+Gen+TypS+Gram_x_TypS+Gram_x_Gen_x_TypS"), 
+                             dv=subset(clean_df, !is.na(clean_df$total_duration))$total_duration)
+
+# lexical_gpt
+# sample from posterior distribution.
+syntax_gpt_clean <- stan(file = "stan/Modelcomparison.stan", 
+                data = syntax_gpt_clean,
+                iter = 4000, 
+                chains = 4,
+                control = list(adapt_delta=0.99))
+# saveRDS(syntax_gpt_clean, file = "model/model_comparison/syntax_gpt_clean.rds")
+
+# Perform LOO on cleaned models
+loo_lexical_clean <- loo(lexical_gpt_clean)
+loo_syntax_clean <- loo(syntax_gpt_clean)
+
+# Compare the cleaned models
+loo_compare(loo_lexical_clean, loo_syntax_clean)
+```
+
+# PLOT
+```{r}
+# Create an aggregate DF with mean and 95% CIs for each condition and sentence region
+
+et_df <- et %>%
+  spread(measure, value) %>%
+  mutate(skip = ifelse(total_duration!= 0, 0, 1),
+         FPReg = ifelse(gaze_duration==0, NA, FPReg),
+         FPFix = ifelse(gaze_duration==0, NA, FPFix)) %>%
+  filter(skip == 0) %>%
+  
+  gather(measure, value, 10:16) %>%
+  mutate(tgt_zero = if_else(measure %in% c("SFD", "gaze_duration", "go_past_time", "total_duration") & value == 0, F, T)) %>%
+  filter(tgt_zero != F) %>%
+  drop_na() %>%
+  dplyr::select(-tgt_zero, -cond, -skip) %>%
+
+  mutate(region = as.double(substr(AOI_id, 2, 2))) %>%
+  # mutate(region = factor(region, levels=c('1', '2', '3', '4'), labels=c("critical -2", "critical -1", "critical", "critical +1"))) %>%
+  mutate(type_s = ifelse(type %in% c('stim_adj'), "Modifying_Adj", "Predictive_Adj_Verb"),
+         type_l = ifelse(type %in% c('stim_verb'), "Verb", "Modifying_Adj_Predictive_Adj")
+         ) %>%
+  spread(measure, value) %>%
+  gather(measure, value, c("SFD", "gaze_duration", "go_past_time", "total_duration")) %>%
+  mutate(outlier = value > (mean(value, na.rm = TRUE) + 3 * sd(value, na.rm = TRUE))) %>%
+  filter(outlier == FALSE) %>%
+  dplyr::select(-outlier) %>%
+  spread(measure, value) %>%
+  drop_na(total_duration) %>%
+  gather(measure, value, 12:18) %>%
+  drop_na()
+
+# View(et_df)
+
+et_agg_s = et_df %>%
+  group_by(type_s, gender_match, region, measure) %>%
+    summarise(
+      m = mean(value),
+      s = std.error(value),
+      lower = m - 1.96 * s,
+      upper = m + 1.96 * s
+    ) %>%
+  ungroup()
+
+View(et_agg_s) 
+
+```
+
+```{r}
+
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_s %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("gaze_duration", "go_past_time", "total_duration")) %>%
+  
+  mutate(type_s = factor(type_s, levels = c("Modifying_Adj", "Predictive_Adj_Verb"), labels=c("Modifying Adj.", "Predicative Adj. & Verb"))) %>%
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration"), labels=c("Gaze Duration", "Go Past Times", "Total Duration"))) %>%
+
+  ggplot(aes(x=region, y=m, color = gender_match)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=lower-100, ymax=upper+100), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_grid(measure~type_s, scales = "free_y") +
+    # scale_x_continuous(breaks = 1:4, labels = c("critical -2", "critical -1", "critical", "critical +1")) +
+    #ggtitle(paste0("Region by region plot for ", stim)) +
+    ylab("Reading time (ms)") +
+    xlab("Sentence Region") +
+  scale_color_manual(values = c("Match" = "#56BCC2", "Mis" = "#E77D72")) +
+  #coord_cartesian(ylim=c(0, 900)) +
+  theme(
+    # axis.text.x = element_text(size = 9),
+    legend.position = "bottom"
+  )
+
+ggsave(paste0("./images/et_RT_results_synt_position.pdf"), device="pdf", height=5, width=8)
+```
+
+```{r}
+et_agg_s2 <- et_df %>%
+  group_by(type_s, subj_id, region, measure) %>%
+    summarise(
+      m = mean(value),
+    ) %>%
+  ungroup() %>%
+  group_by(type_s, region, measure) %>%
+  pivot_wider(
+    names_from = type_s,
+    values_from = m,
+    names_prefix = "mean_"
+  ) %>%
+  # Calculate the difference between 'Mis' and 'Match'
+  drop_na() %>%
+  mutate(
+    diff = mean_Predictive_Adj_Verb - mean_Modifying_Adj
+  ) %>%
+  group_by(region, measure) %>%
+  summarise(
+    m_diff = mean(diff),
+    s = std.error(diff),
+    lower = m_diff - 1.96 * s,
+    upper = m_diff + 1.96 * s
+  ) %>%
+  ungroup()
+
+View(et_agg_s2)
+```
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_s2 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("gaze_duration", "go_past_time", "total_duration")) %>%
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration"), labels=c("Gaze Duration", "Go Past Times", "Total Duration"))
+         ) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = measure)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=lower-100, ymax=upper+100), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    labs(
+      title = "Difference in RTs: \nExternal (Verb or Predicative Adj.) vs Internal agreement (Modifying Adj.)",
+      y = "Reading time difference (ms)",
+      x = "Sentence Region",
+      color = "Measure"
+    ) +
+  #coord_cartesian(ylim=c(0, 900)) +
+  scale_x_continuous(breaks = c(1:5)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_RT_results_main_diff_in_synt.pdf"), device="pdf", height=5, width=8)
+```
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_s2 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("FPReg", "RegIn")) %>%
+  mutate(measure = factor(measure, levels = c("FPReg", "RegIn"), labels=c("First Pass Regression out Prob.", "Regression in Prob."))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = measure)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=-0.2, ymax=0.2), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    labs(
+      title = "Difference in Regressions: \nExternal (Verb or Predicative Adj.) vs Internal agreement (Modifying Adj)",
+      y = "Regression difference (ms)",
+      x = "Sentence Region",
+      color = "Measure"
+    ) +
+  #coord_cartesian(ylim=c(0, 900)) +
+  scale_x_continuous(breaks = c(1:4)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_Regression_results_main_diff_in_synt.pdf"), device="pdf", height=5, width=8)
+```
+
+
+```{r}
+et_agg_s3 = et_df %>%
+  group_by(type_s, gender_match, item_id, region, measure) %>%
+    summarise(
+      m = mean(value)
+    ) %>%
+  ungroup() %>%
+  group_by(type_s, region, measure) %>%
+  pivot_wider(
+    names_from = gender_match,
+    values_from = m,
+    names_prefix = "mean_"
+  ) %>%
+  # Calculate the difference between 'Mis' and 'Match'
+  drop_na() %>%
+  mutate(
+    diff = mean_Mis - mean_Match
+  ) %>%
+  group_by(type_s, region, measure) %>%
+  summarise(
+    m_diff = mean(diff),
+    s = std.error(diff),
+    lower = m_diff - 1.96 * s,
+    upper = m_diff + 1.96 * s
+  ) %>%
+  ungroup()
+
+```
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_s3 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("gaze_duration", "go_past_time", "total_duration")) %>%
+  
+  mutate(type_s = factor(type_s, levels = c("Modifying_Adj", "Predictive_Adj_Verb"), labels=c("Modifying Adj.", "Predicative Adj. & Verb"))) %>%
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration"), labels=c("Gaze Duration", "Go Past Times", "Total Duration"))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = type_s)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=lower-100, ymax=upper+100), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    #ggtitle(paste0("Region by region plot for ", stim)) +
+    labs(
+      title = "RTs Difference under Mismatch and Match conditions",
+      y = "Reading time difference (ms)",
+      x = "Sentence Region",
+      color = "Agreement Type"
+    ) +
+  scale_x_continuous(breaks = c(1:5)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_RT_results_interaction_in_synt.pdf"), device="pdf", height=5, width=8)
+```
+
+```{r}
+et_agg_s3 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("FPReg", "RegIn")) %>%
+  
+  mutate(type_s = factor(type_s, levels = c("Modifying_Adj", "Predictive_Adj_Verb"), labels=c("Modifying Adj.", "Predicative Adj. & Verb"))) %>%
+  mutate(measure = factor(measure, levels = c("FPReg", "RegIn"), labels=c("First Pass Regression out Prob.", "Regression in Prob."))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = type_s)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=-0.3, ymax=0.3), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    #ggtitle(paste0("Region by region plot for ", stim)) +
+    labs(
+      title = "Regression Difference under Mismatch and Match conditions",
+      y = "Regression prob. difference",
+      x = "Sentence Region",
+      color = "Agreement Type"
+    ) +
+  scale_x_continuous(breaks = c(1:5)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_Regression_results_interaction_in_synt.pdf"), device="pdf", height=5, width=8)
+```
+
+```{r}
+et_agg_l2 = et_df %>%
+  group_by(type_l, subj_id, region, measure) %>%
+    summarise(
+      m = mean(value),
+    ) %>%
+  ungroup() %>%
+  group_by(type_l, region, measure) %>%
+  pivot_wider(
+    names_from = type_l,
+    values_from = m,
+    names_prefix = "mean_"
+  ) %>%
+  # Calculate the difference between 'Mis' and 'Match'
+  drop_na() %>%
+  mutate(
+    diff = mean_Modifying_Adj_Predictive_Adj - mean_Verb
+  ) %>%
+  group_by(region, measure) %>%
+  summarise(
+    m_diff = mean(diff),
+    s = std.error(diff),
+    lower = m_diff - 1.96 * s,
+    upper = m_diff + 1.96 * s
+  ) %>%
+  ungroup()
+
+View(et_agg_l2)
+```
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_l2 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("gaze_duration", "go_past_time", "total_duration")) %>%
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration"), labels=c("Gaze Duration", "Go Past Times", "Total Duration"))
+         ) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = measure)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=lower-100, ymax=upper+100), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    labs(
+      title = "Difference in RTs:\n Adj. (Modifying Adj. and Predictive Adj.) vs Verb",
+      y = "Reading time difference (ms)",
+      x = "Sentence Region",
+      color = "Measure"
+    ) +
+  #coord_cartesian(ylim=c(0, 900)) +
+  scale_x_continuous(breaks = c(1:5)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_RT_results_main_diff_in_lexical.pdf"), device="pdf", height=5, width=8)
+```
+
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_l2 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("FPReg", "RegIn")) %>%
+  mutate(measure = factor(measure, levels = c("FPReg", "RegIn"), labels=c("First Pass Regression out Prob.", "Regression in Prob."))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = measure)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=-0.2, ymax=0.2), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    labs(
+      title = "Difference in Regressions: \nAdj. (Modifying Adj. and Predictive Adj.) vs Verb",
+      y = "Regression prob. difference",
+      x = "Sentence Region",
+      color = "Measure"
+    ) +
+  #coord_cartesian(ylim=c(0, 900)) +
+  scale_x_continuous(breaks = c(1:5)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_Regression_results_main_diff_in_lexical.pdf"), device="pdf", height=5, width=8)
+# ggsave(paste0("./images/RT_results.png"), height=5, width=8)
+```
+
+```{r}
+et_agg_l3 = et_df %>%
+  group_by(type_l, gender_match, item_id, region, measure) %>%
+    summarise(
+      m = mean(value)
+    ) %>%
+  ungroup() %>%
+  group_by(type_l, region, measure) %>%
+  pivot_wider(
+    names_from = gender_match,
+    values_from = m,
+    names_prefix = "mean_"
+  ) %>%
+  # Calculate the difference between 'Mis' and 'Match'
+  drop_na() %>%
+  mutate(
+    diff = mean_Mis - mean_Match
+  ) %>%
+  group_by(type_l, region, measure) %>%
+  summarise(
+    m_diff = mean(diff),
+    s = std.error(diff),
+    lower = m_diff - 1.96 * s,
+    upper = m_diff + 1.96 * s
+  ) %>%
+  ungroup()
+
+# View(et_agg_l3)
+```
+
+```{r}
+# Plot the reading times in each region broken down by stimulus type, reading measure and target gender
+
+et_agg_l3 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("gaze_duration", "go_past_time", "total_duration")) %>%
+  
+  mutate(type_l = factor(type_l, levels = c("Modifying_Adj_Predictive_Adj", "Verb"), labels=c("Modifying Adj. & Predicative Adj.", "Verb"))) %>%
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration"), labels=c("Gaze Duration", "Go Past Times", "Total Duration"))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = type_l)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=lower-100, ymax=upper+100), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    #ggtitle(paste0("Region by region plot for ", stim)) +
+    labs(
+      title = "RTs Difference under Mismatch and Match conditions",
+      y = "Reading time difference (ms)",
+      x = "Sentence Region",
+      color = "Agreement Type"
+    ) +
+  scale_x_continuous(breaks = c(1:4)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_RT_results_interaction_in_lexical.pdf"), device="pdf", height=5, width=8)
+# ggsave(paste0("./images/RT_results.png"), height=5, width=8)
+```
+
+```{r}
+et_agg_l3 %>%
+  # filter(type_s %in% c("stim_adj", "stim_verb", "stim_pred_adj")) %>%
+  filter(measure %in% c("FPReg", "RegIn")) %>%
+  
+  mutate(type_l = factor(type_l, levels = c("Modifying_Adj_Predictive_Adj", "Verb"), labels=c("Modifying Adj. & Predicative Adj.", "Verb"))) %>%
+  mutate(measure = factor(measure, levels = c("FPReg", "RegIn"), labels=c("First Pass Regression out Prob.", "Regression in Prob."))) %>%
+
+  ggplot(aes(x=region, y=m_diff, color = type_l)) +
+    geom_rect(aes(xmin=2.5, xmax=3.5, ymin=-0.3, ymax=0.3), color = NA, fill = "green", alpha=0.01) +
+    geom_point() +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.2) +
+    geom_line() +
+    facet_wrap(~ measure, scales = "free_y") +
+    #ggtitle(paste0("Region by region plot for ", stim)) +
+    labs(
+      title = "Regression Difference under Mismatch and Match conditions",
+      y = "Regression prob. difference",
+      x = "Sentence Region",
+      color = "Agreement Type"
+    ) +
+  scale_x_continuous(breaks = c(1:4)) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(paste0("./images/et_Regression_results_interaction_in_lexical.pdf"), device="pdf", height=5, width=8)
+```
+
