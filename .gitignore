@@ -24,7 +24,7 @@ yarn-error.log*
 # models
 metadata/
 data/
-refs/
+ref/
 model/
 models/
 OLD/
