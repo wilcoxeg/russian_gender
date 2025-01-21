@@ -1,0 +1,363 @@
+---
+title: "Power analysis"
+output: html_document
+date: "2025-01-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=TRUE, results='hide', warning=FALSE, message=FALSE, eval=TRUE}
+shhh <- suppressPackageStartupMessages
+
+shhh(library(dplyr))
+shhh(library(afex))
+shhh(library(ggplot2))
+shhh(library(lme4))
+shhh(library(lmerTest))
+shhh(library(tidyverse))
+shhh(library(gridExtra))
+shhh(library(brms))
+shhh(library(bayesplot))
+shhh(library(MASS))
+shhh(library(designr))
+
+```
+
+# Read in raw data -- for sanity check of the simulated data
+```{r Read data, echo=TRUE, eval=TRUE}
+contr_motr <- read_csv("./stats/motr_reading_measures_contrast_coded.csv", show_col_types = FALSE) %>%
+  filter(AOI_id == "R3") %>%
+  mutate(subj_id = as.character(subj_id),
+         item_id = as.character(item_id),
+         theoryS = if_else(type == "stim_adj", "internal", "external"),
+         theoryL = if_else(type == "stim_verb", "verb", "adj")) %>%
+  dplyr::select(item_id, word_nr, word, AOI_id, subj_id, type, target_gender, gender_match, cond, Gram, Gen, Synt, Lex, Gram_x_Gen, Gen_x_Synt, Gen_x_Lex, Gram_x_Synt, Gram_x_Lex, Gram_x_Gen_x_Synt, Gram_x_Gen_x_Lex, gaze_duration, go_past_time, total_duration, FPReg, RegIn_incl, theoryS, theoryL )
+
+contr_et <- read_csv("./stats/et_reading_measures_contrast_coded.csv", show_col_types = FALSE) %>%
+    filter(AOI_id == "R3") %>%
+  mutate(subj_id = as.character(subj_id),
+         item_id = as.character(item_id),
+         theoryS = if_else(type == "stim_adj", "internal", "external"),
+         theoryL = if_else(type == "stim_verb", "verb", "adj"))
+
+# View(contr_motr)
+# View(contr_et)
+```
+
+# Power Analysis --Bayesian
+
+## variable prep
+```{r Variable Preparation, echo=TRUE, eval=TRUE, message=TRUE}
+# Initialize prep_stats dataframe for storing eff size, variance terms from fitted models and some variables
+prep_stats <- data.frame()
+
+fixeff_names <- c("b_0", "b_Gram", "b_Gen", "b_Synt", "b_Lex",
+                "b_Gram_x_Synt", "b_Gram_x_Lex", "b_Gram_x_Gen_x_Synt", "b_Gram_x_Gen_x_Lex")
+raneff_names <- c("sj_0", "sj_Gram", "sj_Gen", "sj_Synt", "sj_Lex",
+                        "sj_Gram_x_Synt", "sj_Gram_x_Lex", "sj_Gram_x_Gen_x_Synt", "sj_Gram_x_Gen_x_Lex",
+                        "it_0", "it_Gram", "it_Gen")
+residual_name <- c("residual")
+
+cor_subj_name <- c(
+  "L_u[2,1]", "L_u[3,1]", "L_u[3,2]", "L_u[4,1]", "L_u[4,2]", "L_u[4,3]", 
+  "L_u[5,1]", "L_u[5,2]", "L_u[5,3]", "L_u[5,4]", "L_u[6,1]", "L_u[6,2]", 
+  "L_u[6,3]", "L_u[6,4]", "L_u[6,5]", "L_u[7,1]", "L_u[7,2]", "L_u[7,3]", 
+  "L_u[7,4]", "L_u[7,5]", "L_u[7,6]", "L_u[8,1]", "L_u[8,2]", "L_u[8,3]", 
+  "L_u[8,4]", "L_u[8,5]", "L_u[8,6]", "L_u[8,7]", "L_u[9,1]", "L_u[9,2]", 
+  "L_u[9,3]", "L_u[9,4]", "L_u[9,5]", "L_u[9,6]", "L_u[9,7]", "L_u[9,8]"
+)
+
+cor_item_name <- c("L_w[2,1]", "L_w[3,1]", "L_w[3,2]")
+
+```
+
+```{r Prep Variance Coef, echo=TRUE, eval=FALSE, message=TRUE}
+## Note: this chunk takes some time to run!
+# Define regions, methods, and measure types
+methods <- c("motr", "et")
+regions <- c("R3")
+measure_types <- c("gaze_duration", "go_past_time", "total_duration")
+
+for (meth in methods) {
+  for (region in regions) {
+    for (meas in measure_types) {
+      # Load the model
+      model_path <- paste0("models/", meth, "_", meas, "_", region, ".rds")
+      m1 <- readRDS(model_path)
+      p_sum <- as.data.frame(summary(m1)$summary)  # Convert summary to dataframe
+      rownames(p_sum) <- rownames(summary(m1)$summary)
+      
+      # Extract fixed effects
+      fixeff <- p_sum[grep("^beta\\[", rownames(p_sum)), "mean"]
+      fixeff_names <- c("b_0", "b_Gram", "b_Gen", "b_Synt", "b_Lex",
+                        "b_Gram_x_Synt", "b_Gram_x_Lex", "b_Gram_x_Gen_x_Synt", "b_Gram_x_Gen_x_Lex")
+      
+      # Extract random effects variances
+      raneff <- p_sum[grep("^sigma_u\\[|^sigma_w\\[", rownames(p_sum)), "mean"]
+      raneff_names <- c("sj_0", "sj_Gram", "sj_Gen", "sj_Synt", "sj_Lex",
+                        "sj_Gram_x_Synt", "sj_Gram_x_Lex", "sj_Gram_x_Gen_x_Synt", "sj_Gram_x_Gen_x_Lex",
+                        "it_0", "it_Gram", "it_Gen")
+      
+      # Extract residual
+      residual <- p_sum[grep("^sigma_e$", rownames(p_sum)), "mean"]
+      residual_name <- "residual"
+      
+      # Extract subject-level correlations
+      cor_subj <- p_sum[rownames(p_sum) %in% cor_subj_name, "mean"]
+      
+      # Extract item-level correlations
+      cor_item <- p_sum[rownames(p_sum) %in% cor_item_name, "mean"]
+      
+      # Combine subject and item correlations
+      cor_names <- c(cor_subj_name, cor_item_name)
+      cor_values <- c(cor_subj, cor_item)
+      
+      # Combine all effects
+      eff_names <- c(fixeff_names, raneff_names[1:length(raneff)], residual_name, cor_names)
+      eff_values <- c(fixeff, raneff, residual, cor_values)
+      
+      # Prepare the results data frame
+      temp_results <- data.frame(
+        method = rep(meth, length(eff_names)),
+        region = rep(region, length(eff_names)),
+        measure = rep(meas, length(eff_names)),
+        effect_name = eff_names,
+        effect_value = eff_values
+      )
+      
+      # Append the temp_results to the p_stats data frame
+      prep_stats <- rbind(prep_stats, temp_results)
+    }
+  }
+}
+
+# View the final p_stats dataframe
+View(prep_stats)
+
+
+prep_stats <- prep_stats %>%
+  mutate(effect_value = round(effect_value, 2))
+
+# write.csv(prep_stats, "./stats/power_preparation_stats.csv", row.names = FALSE)
+```
+
+## Loop through RT reading measures, methods and Simulate data
+```{r Power estimate, echo=TRUE, eval=FALSE, message=TRUE}
+## Note: this block takes very long to run!
+
+set.seed(234)
+
+power_prep_gpt <- read_csv("./stats/power_preparation_stats.csv", show_col_types = FALSE) %>%
+  filter(measure == "gaze_duration")
+
+methods <- c("motr", "et")
+measure_types <- c("gaze_duration")
+# measure_types <- c("gaze_duration", "total_duration", "go_past_time")
+
+COF_simulation <- data.frame()
+
+# Loop over methods and measures
+for (meth in methods) {
+  for (meas in measure_types) {
+    print(paste("Simulate data for:", meas, "using method:", meth))
+    if (meth == "motr") {
+      data <- power_prep_gpt %>% filter(method == "motr" & measure == meas)
+    } else {
+      data <- power_prep_gpt %>% filter(method == "et" & measure == meas)
+    }
+    
+    fix <- data %>% filter(effect_name %in% fixeff_names) %>% pull(effect_value)
+    sd_Subj <- data %>% filter(effect_name %in% raneff_names[c(1, 2)]) %>% pull(effect_value)
+    sd_Item <- data %>% filter(effect_name %in% raneff_names[c(10, 11)]) %>% pull(effect_value)
+    sd_Res <- data %>% filter(effect_name %in% residual_name) %>% pull(effect_value)
+    cor_Subj <- data %>% filter(effect_name %in% cor_subj_name) %>% pull(effect_value)
+    cor_Item <- data %>% filter(effect_name %in% cor_item_name) %>% pull(effect_value)
+    
+    nsubj <- seq(3,6,1) 
+    nsim <- length(nsubj)
+    nitem  <- seq(2, 4, 2)
+    nsimIt <- length(nitem)
+    
+    for (i in 1:nsim) {
+      for (t in 1:nsimIt) {
+        design <-
+          fixed.factor("target_gender", levels=c("F", "M")) +
+          fixed.factor("gender_match", levels=c("Match", "Mis")) +
+          fixed.factor("type", levels=c("stim_adj", "stim_verb", "stim_pred_adj")) +
+          random.factor("S", instances=nsubj[i]) +
+          random.factor("I", instances=nitem[t]) +
+          random.factor(c("S", "I"), groups=c("target_gender", "gender_match", "type"))
+      
+        dat <- design.codes(design) %>%
+          mutate(cond = case_when(
+          target_gender == "M" & gender_match == "Mis" & type == "stim_adj" ~ "a",
+          target_gender == "M" & gender_match == "Mis" & type == "stim_verb" ~ "b",
+           target_gender == "M" & gender_match == "Mis" & type == "stim_pred_adj" ~ "c",
+          target_gender == "M" & gender_match == "Match" & type == "stim_adj" ~ "d",
+          target_gender == "M" & gender_match == "Match" & type == "stim_verb" ~ "e",
+          target_gender == "M" & gender_match == "Match" & type == "stim_pred_adj" ~ "f",
+          target_gender == "F" & gender_match == "Mis" & type == "stim_adj" ~ "g",
+          target_gender == "F" & gender_match == "Mis" & type == "stim_verb" ~ "h",
+          target_gender == "F" & gender_match == "Mis" & type == "stim_pred_adj" ~ "i",
+          target_gender == "F" & gender_match == "Match" & type == "stim_adj" ~ "j",
+          target_gender == "F" & gender_match == "Match" & type == "stim_verb" ~ "k",
+          target_gender == "F" & gender_match == "Match" & type == "stim_pred_adj" ~ "l",
+          TRUE ~ NA_character_ # This is the default case if none of the above conditions are met
+        )) %>%
+        mutate(
+          cond = factor(cond),
+          #--------------------- main effects ---------------------
+          Gram = ifelse(cond %in% c('a', 'b', 'c', 'g', 'h', 'i'), 1/2, -1/2), # Main effect grammaticality
+          Gen = ifelse(cond %in% c('a','b','c','d','e', 'f'), 1/2, -1/2), # Main effect gender
+          Synt = ifelse(cond %in% c('b', 'e', 'h', 'k'), 0,
+                              ifelse(cond %in% c('c', 'f', 'i', 'l'), -2/3, 2/3)), # Main effect of feature matching  (a vs pv)
+          Lex = ifelse(cond %in% c('a', 'd', 'g', 'j'), 0,
+                              ifelse(cond %in% c('c', 'f', 'i', 'l'), -2/3, 2/3)), # Main effect of lexical category (ap vs v)
+  
+          #--------------------- 2-way interactions ---------------------
+          Gram_x_Gen = ifelse(cond %in% c('a', 'b', 'c', 'j', 'k', 'l'), 1/2, -1/2), # Grammaticality x Gender
+          Gen_x_Synt = ifelse(cond %in% c('b', 'e', 'h', 'k'), 0,
+                              ifelse(cond %in% c('c', 'f', 'g', 'j'), -2/3, 2/3)), # Gender x Feature matching
+          Gen_x_Lex = ifelse(cond %in% c('a', 'd', 'g', 'j'), 0,
+                              ifelse(cond %in% c('c', 'f', 'h', 'k'), -2/3, 2/3)), # Gender x Lexical category
+          Gram_x_Synt = ifelse(cond %in% c('b', 'e', 'h', 'k'), 0,
+                              ifelse(cond %in% c('c', 'd', 'i', 'j'), -2/3, 2/3)), # Grammaticality x Feature matching
+          Gram_x_Lex = ifelse(cond %in% c('a', 'd', 'g', 'j'), 0,
+                              ifelse(cond %in% c('c', 'e', 'i', 'k'), -2/3, 2/3)), # Grammaticality x Lexical Category
+  
+          #--------------------- 3 way interection ---------------------
+          Gram_x_Gen_x_Synt = ifelse(cond %in% c('b', 'e', 'h', 'k'), 0,
+                              ifelse(cond %in% c('c', 'd', 'g', 'l'), -1/3, 1/3)), # gen x synt(ap v) x gram
+          Gram_x_Gen_x_Lex = ifelse(cond %in% c('a', 'd', 'g', 'j'), 0,
+                              ifelse(cond %in% c('c', 'e', 'h', 'l'), -1/3, 1/3)) # gen x lex(ap v) x gram
+        ) %>% mutate(subj_id = S, item_id = I,
+                     theoryS = if_else(type == "stim_adj", "internal", "external"),
+                     theoryL = if_else(type == "stim_verb", "verb", "adj"))
+      
+        nsj <- length(unique(dat$subj_id))
+        nit <- length(unique(dat$item_id))
+        # print(nsj)
+        
+      form <-  ~ 1 + Gram + Gen + Synt + Lex + Gram_x_Synt + Gram_x_Lex + Gram_x_Gen_x_Synt + Gram_x_Gen_x_Lex + (1 + Gram| subj_id) + (1 + Gram | item_id)
+  
+        for (j in 1:100) { 
+          # simulate data
+          dat$sim_log <- simLMM(form, data=dat, Fixef=fix, VC_sd=list(sd_Subj, sd_Item, sd_Res), CP = 0.0, empirical=FALSE)
+      
+          sim_df <- dat %>% mutate(sim_data= exp(sim_log)) 
+          
+          summary_model <- summary(lmer(sim_log ~ 1 + Gram + Gen + Synt + Lex + Gram_x_Synt + Gram_x_Lex + Gram_x_Gen_x_Synt + Gram_x_Gen_x_Lex + (1 + Gram|| item_id) + (1 + Gram|| subj_id), data=sim_df,
+                                      control=lmerControl(calc.derivs=FALSE)))
+          # print(summary_model)
+          # print(coef(summary_model)[6,])
+          # print(coef(summary_model)[7,])
+          GramxSynt_cof <- coef(summary_model)[6,]
+          GramxLex_cof <- coef(summary_model)[7,]
+          
+          COF_simulation <- rbind(
+            COF_simulation, 
+            cbind(
+              method = meth,
+              measure = meas,
+              pp_counts = nsj,
+              item_counts = nit,
+              interactions = "Gram_x_Synt",
+              Estimate = GramxSynt_cof["Estimate"],
+              SE = GramxSynt_cof["Std. Error"],
+              df = GramxSynt_cof["df"],
+              t = GramxSynt_cof["t value"],
+              p = GramxSynt_cof["Pr(>|t|)"]
+            )
+          )
+          
+          # Append GramxLex results
+          COF_simulation <- rbind(
+            COF_simulation, 
+            cbind(
+              method = meth,
+              measure = meas,
+              pp_counts = nsj,
+              item_counts = nit,
+              interactions = "Gram_x_Lex",
+              Estimate = GramxLex_cof["Estimate"],
+              SE = GramxLex_cof["Std. Error"],
+              df = GramxLex_cof["df"],
+              t = GramxLex_cof["t value"],
+              p = GramxLex_cof["Pr(>|t|)"]
+            )
+          )
+        }
+      }
+    }
+  }
+}
+
+# View(COF_simulation)
+# write.csv(COF_simulation, file = "./stats/motr_et_power_gd_bayesian.csv", row.names = FALSE)
+
+## to get power for empirical setups
+# write.csv(COF_simulation, file = "./stats/motr_et_power_empirical_all_measures.csv", row.names = FALSE)
+```
+
+```{r Get power, echo=TRUE, eval=TRUE, message=TRUE}
+## If we want to bin the pp_counts and smooth the lines with a CI interval
+COF <- read_csv("./stats/motr_et_power_gd_bayesian.csv", show_col_types = FALSE) %>%
+  filter(!is.na(pp_counts)) %>%
+  mutate(pp_counts = as.numeric(pp_counts),
+         sign = as.numeric(p < 0.05)) %>%
+  mutate(interactions = factor(interactions, levels = c("Gram_x_Synt", "Gram_x_Lex"))) %>%
+  group_by(method, interactions) %>%
+  mutate(ppF = gtools::quantcut(pp_counts, q = seq(0, 1, length = 10))) %>%
+  group_by(ppF, .add = TRUE) %>%
+  mutate(ppFL = mean(pp_counts)) %>%
+  ungroup() 
+
+# If we want to use the unbinned power 
+power_df <- read_csv("./stats/motr_et_power_gd_bayesian.csv", show_col_types = FALSE) %>%
+# power_df <- COF_simulation %>%
+  group_by(method, measure, pp_counts, item_counts, interactions) %>%
+  summarize(
+    power = mean((p < 0.05)), .groups = "drop") %>%  
+  mutate(pp_counts = as.numeric(pp_counts),
+         item_counts = as.numeric(item_counts)) %>%
+  arrange(method, pp_counts, item_counts)
+
+```
+
+```{r Plot power, echo=TRUE, eval=TRUE, message=TRUE}
+ggplot(data = COF) +
+  facet_grid(interactions ~ item_counts, labeller = labeller(interactions = as_labeller(c("Gram_x_Synt" = "GramxAgrType", "Gram_x_Lex" = "GramxLexCat")), item_counts = as_labeller(c("24" = "Item Counts = 24", "48" = "Item Counts = 48", "72" = "Item Counts = 72")))) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "grey") +
+  geom_smooth(aes(x = pp_counts, y = sign, color = as.factor(method), linetype = as.factor(method)), method = 'gam',formula = y ~ s(x, bs = "cs")) +
+  geom_point(stat = "summary", fun = "mean", aes(x = ppFL, y = sign, color = as.factor(method)), size = 1.2) +
+  geom_line(stat = "summary", fun = "mean", aes(x = ppFL, y = sign, color = as.factor(method))) +
+  
+  # Customize y-axis limits and colors
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.2)) +
+  scale_color_manual(values = c("motr" = "#fe166a", "et" = "#00778E"), 
+                     labels = c("motr" = "MoTR", "et" = "Eye-tr."), 
+                     name = "Method") +
+  scale_linetype_manual(values = c("motr" = "solid", "et" = "solid"), 
+                        labels = c("motr" = "MoTR", "et" = "Eye-tr."), 
+                        name = "Method") +
+  labs(x = "Participant Counts", 
+       y = "Power") +
+  theme_light() +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position = "right",                  
+    legend.box = "vertical",                   
+    strip.text = element_text(size = 10, color = "black"),
+    strip.background = element_rect(fill = "grey80", color = "black", linewidth = 0.7),
+    # strip.background = element_rect(fill = "grey80", color = "grey80"),  
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.5),  
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.3),  
+    panel.grid.minor = element_blank(),         
+    axis.text.x = element_text(hjust = 1, size = 10)  
+  )
+
+# ggsave(paste0("./images/power_analysis_gd.pdf"), device="pdf", height=4.5, width=8)
+
+```

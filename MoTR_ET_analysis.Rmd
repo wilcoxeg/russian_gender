@@ -7,8 +7,6 @@ output: html_notebook
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-
-
 ```{r libraries, echo=TRUE, results='hide', warning=FALSE, message=FALSE, eval=TRUE}
 shhh <- suppressPackageStartupMessages # It's a library, so shhh!
 
@@ -38,6 +36,8 @@ shhh(library(stringr))
 shhh(library(loo))
 shhh(library(MASS))
 shhh(library(hypr))
+shhh(library(designr))
+shhh(library(afex))
 
 shhh(library(coda))
 shhh(library(rstan))
@@ -63,8 +63,10 @@ et_raw <- file_list %>%
 
 # clean ET raw data
 ```{r ET-clean, echo=TRUE, warning=FALSE, eval=TRUE}
+select_meas <- c("SFD", "total_duration", "gaze_duration", "FPFix", "go_past_time", "FPReg", "RegIn")
+
 et <- et_raw %>%
-  dplyr::select(IA_LABEL, item, word.id, list, RECORDING_SESSION_LABEL, SFD, IA_DWELL_TIME, IA_FIRST_RUN_DWELL_TIME, IA_FIRST_FIX_PROGRESSIVE, IA_SELECTIVE_REGRESSION_PATH_DURATION, IA_REGRESSION_OUT, IA_REGRESSION_IN, gender_match, part, target_gender, type, Region, condition, ACCURACY) %>%
+  dplyr::select(IA_LABEL, item, word.id, list, RECORDING_SESSION_LABEL, SFD, IA_DWELL_TIME, IA_FIRST_RUN_DWELL_TIME, IA_FIRST_FIX_PROGRESSIVE, IA_SELECTIVE_REGRESSION_PATH_DURATION, IA_REGRESSION_OUT, IA_REGRESSION_IN, gender_match, part, target_gender, type, Region, condition, ACCURACY, animacy) %>%
   rename(
     word = IA_LABEL,
     item_id = item,
@@ -89,7 +91,7 @@ et <- et_raw %>%
   mutate(
          FPReg = ifelse(gaze_duration==0, NA, FPReg),
          FPFix = ifelse(gaze_duration==0, NA, FPFix)) %>%
-  gather(measure, value, 6:12) %>%
+  gather(measure, value, select_meas) %>%
   mutate(
     value = as.numeric(value),
     tgt_zero = if_else(measure %in% c("SFD", "gaze_duration", "go_past_time", "total_duration") & value == 0, F, T)) %>%
@@ -98,17 +100,17 @@ et <- et_raw %>%
   mutate(item_id = as.factor(item_id),
          subj_id = as.factor(subj_id)) %>%
   spread(measure, value) %>%
-  
+
   # Note: we commented these lines out when running models because we logged the data and used mix effects to account for the variances and noises. If also filter outliers when running models, the results will not change qualitatively, but the estimated CI (or CrI) will be a bit narrower.
   # We filter outliers only for aesthetic reasons in plotting.
-  
+
   gather(measure, value, c("SFD", "gaze_duration", "go_past_time", "total_duration")) %>%
   mutate(outlier = value > (mean(value, na.rm = TRUE) + 3 * sd(value, na.rm = TRUE))) %>%
   filter(outlier == FALSE) %>%
   dplyr::select(-outlier) %>%
   spread(measure, value) %>%
-  
-  gather(measure, value, 12:18) %>%
+
+  gather(measure, value, select_meas) %>%
   mutate(cond = case_when(
     target_gender == "M" & gender_match == "Mis" & type == "stim_adj" ~ "a",
     target_gender == "M" & gender_match == "Mis" & type == "stim_verb" ~ "b",
@@ -123,9 +125,11 @@ et <- et_raw %>%
     target_gender == "F" & gender_match == "Match" & type == "stim_verb" ~ "k",
     target_gender == "F" & gender_match == "Match" & type == "stim_pred_adj" ~ "l",
     TRUE ~ NA_character_ # This is the default case if none of the above conditions are met
-  )) %>%
-    dplyr::select(-list, -part)
- 
+  )) %>% 
+  # filter(animacy %in% c("Inanim", "inanim")) %>% 
+  dplyr::select(-list, -part, -animacy) 
+
+et 
 ```
 
 
@@ -221,7 +225,7 @@ motr_acc_summary <- motr_acc %>%
 # write.csv(motr_acc_summary, "./stats/correctness_summary.csv", row.names = FALSE)
 
 et_acc <- et %>% dplyr::select(all_of(c("item_id", "subj_id", "cond", "ACCURACY"))) %>%
-  filter(ACCURACY != -1) %>%
+  # filter(ACCURACY != -1) %>%
   distinct() %>%
   mutate(correctness = as.numeric(unlist(ACCURACY)))
 
@@ -378,6 +382,12 @@ contr_et <- et %>%
 # View(contr_et)
 ```
 
+```{r Store data for Power Analysis, echo=TRUE, eval=False}
+# write.csv(contr_et, "./stats/et_reading_measures_contrast_coded.csv", row.names = FALSE)
+# write.csv(contr_motr, "./stats/motr_reading_measures_contrast_coded.csv", row.names = FALSE)
+```
+
+
 ```{r Constrasts sanity check, echo=TRUE, eval=False}
 ## sol2 --> try hypr package, also for sanity check
 hypothesis_matrix <- hypr(
@@ -385,11 +395,11 @@ hypothesis_matrix <- hypr(
   Gen = (a+b+c+d+e+f)/6 ~ (g+h+i+j+k+l)/6,
   Synt = (a+d+g+j)/4 ~ (b+c+e+f+h+i+k+l)/8,
   Lex = (b+e+h+k)/4 ~ (a+c+d+f+g+i+j+l)/8,
-  Gram_x_Gen = ((a+b+c)/3-(d+e+f)/3)/2 ~ ((g+h+i)/3-(j+k+l)/3)/2,
+  # Gram_x_Gen = ((a+b+c)/3-(d+e+f)/3)/2 ~ ((g+h+i)/3-(j+k+l)/3)/2,
   Gram_x_Synt = ((e+f+k+l)/4-(d+j)/2)/2 ~ ((b+c+h+i)/4-(a+g)/2)/2 ,
   Gram_x_Lex =  ((d+f+j+l)/4-(e+k)/2)/2 ~ ((a+c+g+i)/4-(b+h)/2)/2,
-  Gen_x_Synt = ((h+i+k+l)/4-(g+j)/2)/2 ~ ((b+c+e+f)/4-(a+d)/2)/2,
-  Gen_x_Lex = ((g+i+j+l)/4-(h+k)/2)/2 ~ ((a+c+d+f)/4-(b+e)/2)/2,
+  # Gen_x_Synt = ((h+i+k+l)/4-(g+j)/2)/2 ~ ((b+c+e+f)/4-(a+d)/2)/2,
+  # Gen_x_Lex = ((g+i+j+l)/4-(h+k)/2)/2 ~ ((a+c+d+f)/4-(b+e)/2)/2,
   Gram_x_Gen_x_Synt = (((h+i)/2-g)-((k+l)/2-j))/2 ~ (((b+c)/2-a)-((e+f)/2-d))/2,
   Gram_x_Gen_x_Lex = (((g+i)/2-h)-((j+l)/2-k))/2 ~ (((a+c)/2-b)-((d+f)/2-e))/2
 )
@@ -402,9 +412,9 @@ hypothesis_matrix
 ```{r freq-modeling, echo=TRUE, eval=FALSE, message=TRUE}
 
 stats_freq = data.frame()
-regions = c("R2", "R3", "R4", "R5")
+# regions = c("R2", "R3", "R4", "R5")
 methods = c("motr", "et")
-# regions = c("R3")
+regions = c("R3")
 measure_types = c("gaze_duration", "go_past_time", "total_duration",
 "FPReg", "RegIn_incl"
 )
@@ -475,7 +485,7 @@ stats_freq <- stats_freq %>%
     TRUE         ~ ""
   ))
 
-stats_freq
+# View(stats_freq)
 
 # write.csv(stats_freq, "./stats/stats_motr_et_lmer.csv", row.names = FALSE)
 
@@ -497,10 +507,10 @@ createStanData <-function(d, dv,form){
   stanData <- list(N = nrow(X),           
                   P = ncol(X),              
                   n_u = ncol(X),             
-                  n_w = ncol(X),            
+                  n_w = 3,            
                   X = X,                     
                   Z_u = X,                 
-                  Z_w = X,                   
+                  Z_w = X[, 1:3, drop = FALSE],    # only by-item random intercept, Gram, Gen              
                   J = N_subj,                
                   K = N_items,
                   dv = dv,                    
@@ -640,10 +650,11 @@ plot(density_gramxgenxsynt, main = "Density Plot of pst_gramxgenxsynt", xlab = "
 # check posterior predicts --> the fits looks very good --> suspision of overfit? --> cv validation?
 predicts <- y_posterior$Predict_rt
 dim(predicts) # 8000 x 1271
-y_true <- contr_motr %>%
+y_true <- contr_et %>%
   filter(AOI_id == region) %>%             # Filter by the specified region
   filter(!is.na(.data[[meas]])) %>%        # Filter out NA values for the specific measure
   pull(.data[[meas]]) 
+
 ppc_dens_overlay(y_true, yrep = predicts[1:200, ])
 
 ```
@@ -701,7 +712,7 @@ for (meth in methods) {
   
 }
 
-View(stats_df)
+# View(stats_df)
 
 stats_df <- stats_df %>%
   mutate(across(
@@ -713,8 +724,9 @@ stats_df <- stats_df %>%
                     " [", round(crI_95_lower, 2), ", ", 
                     round(crI_95_upper, 2), "]")
   )
-# write.csv(stats_df, "./stats/stats_bayesian.csv", row.names = FALSE)
+write.csv(stats_df, "./stats/stats_bayesian.csv", row.names = FALSE)
 ```
+
 
 ```{r Model Sanity check, eval=FALSE}
 regions <- c("R2", "R3", "R4", "R5")
@@ -755,7 +767,7 @@ all_diffs
 
 # PLOT
 
-```{r}
+```{r PREP PLOT, eval=TRUE}
 measure_types <- c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl")
 
 # prepare motr for plotting
@@ -800,7 +812,7 @@ motr_lex <- motr_plot %>%
   mutate(lex = factor(lex, levels=c("Adjective", "Verb"))) %>%
   mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "First Pass Regression out Prob.", "Regression in Prob."))
          ) %>%
-  mutate(Prediction = "Lexical",
+  mutate(Prediction = "Lexical Category",
           method = "MoTR") %>%
   rename(type = lex) 
 
@@ -832,7 +844,7 @@ motr_synt <- motr_plot %>%
   mutate(synt = factor(synt, levels=c("Internal", "External"))) %>%
   mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "First Pass Regression out Prob.", "Regression in Prob."))
          ) %>%
-  mutate(Prediction = "Feature-matching",
+  mutate(Prediction = "Agreement Type",
          method = "MoTR") %>%
   rename(type = synt)
 
@@ -876,7 +888,7 @@ et_lex <- et_plot %>%
   mutate(lex = factor(lex, levels=c("Adjective", "Verb"))) %>%
   mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "First Pass Regression out Prob.", "Regression in Prob."))
          ) %>%
-  mutate(Prediction = "Lexical",
+  mutate(Prediction = "Lexical Category",
          method = "Eye-tr.") %>%
   rename(type = lex)
 
@@ -908,18 +920,20 @@ et_synt <- et_plot %>%
   mutate(synt = factor(synt, levels=c("Internal", "External"))) %>%
   mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "First Pass Regression out Prob.", "Regression in Prob."))
          ) %>%
-  mutate(Prediction = "Feature-matching",
+  mutate(Prediction = "Agreement Type",
          method = "Eye-tr.") %>%
   rename(type = synt)
 
 motr_et_plot <- rbind(motr_lex, motr_synt, et_lex, et_synt)
+
+stats_df <- read_csv("./stats/stats_bayesian.csv", show_col_types = FALSE)
 
 annotation <- stats_df %>% 
   mutate(region = as.double(substr(region, 2, 2)),
          measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "First Pass Regression out Prob.", "Regression in Prob.")),
           method = if_else(method=="motr", "MoTR", "Eye-tr."))%>% 
   filter(beta %in% c("b_Gram_x_Lex", "b_Gram_x_Synt")) %>%
-  mutate(Prediction = if_else(beta == "b_Gram_x_Lex", "Lexical", "Feature-matching")) %>%
+  mutate(Prediction = if_else(beta == "b_Gram_x_Lex", "Lexical Category", "Agreement Type")) %>%
   dplyr::select(method, region, measure, Prediction, annotation)
 View(annotation)
 
@@ -989,7 +1003,7 @@ plot_annotated %>%
       )
     )
   )
-# ggsave(paste0("./images/motr_rt_interaction.pdf"), device="pdf", height=6, width=8)
+ggsave(paste0("./images/motr_rt_interaction.pdf"), device="pdf", height=6, width=8)
 ```
 
 ```{r}
@@ -1039,7 +1053,7 @@ plot_annotated %>%
     ),
     shape = "none"
   )
-# ggsave(paste0("./images/motr_regression_interaction.pdf"), device="pdf", height=6, width=16/3)
+ggsave(paste0("./images/motr_regression_interaction.pdf"), device="pdf", height=6, width=16/3)
 ```
 
 ```{r}
@@ -1096,7 +1110,7 @@ plot_annotated %>%
       )
     )
   )
-# ggsave(paste0("./images/et_rt_interaction.pdf"), device="pdf", height=6, width=8)
+ggsave(paste0("./images/et_rt_interaction.pdf"), device="pdf", height=6, width=8)
 ```
 
 ```{r}
@@ -1146,5 +1160,9 @@ plot_annotated %>%
     ),
     shape = "none"
   )
-# ggsave(paste0("./images/et_regression_interaction.pdf"), device="pdf", height=6, width=16/3)
+ggsave(paste0("./images/et_regression_interaction.pdf"), device="pdf", height=6, width=16/3)
 ```
+
+
+
+

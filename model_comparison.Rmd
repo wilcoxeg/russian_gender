@@ -1,0 +1,369 @@
+---
+title: "Model Comparison"
+output: html_document
+date: "2025-01-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, echo=TRUE, results='hide', warning=FALSE, message=FALSE, eval=TRUE}
+shhh <- suppressPackageStartupMessages
+
+shhh(library(dplyr))
+shhh(library(afex))
+shhh(library(ggplot2))
+shhh(library(lme4))
+shhh(library(lmerTest))
+shhh(library(tidyverse))
+shhh(library(gridExtra))
+shhh(library(brms))
+shhh(library(bayesplot))
+shhh(library(MASS))
+shhh(library(designr))
+
+```
+
+
+
+# Read in raw data -- for sanity check of the simulated data
+```{r Read data, echo=TRUE, eval=TRUE}
+contr_motr <- read_csv("./stats/motr_reading_measures_contrast_coded.csv", show_col_types = FALSE) %>%
+  filter(AOI_id == "R3") %>%
+  mutate(subj_id = as.character(subj_id),
+         item_id = as.character(item_id),
+         theoryS = if_else(type == "stim_adj", "internal", "external"),
+         theoryL = if_else(type == "stim_verb", "verb", "adj")) %>%
+  dplyr::select(item_id, word_nr, word, AOI_id, subj_id, type, target_gender, gender_match, cond, Gram, Gen, Synt, Lex, Gram_x_Gen, Gen_x_Synt, Gen_x_Lex, Gram_x_Synt, Gram_x_Lex, Gram_x_Gen_x_Synt, Gram_x_Gen_x_Lex, gaze_duration, go_past_time, total_duration, FPReg, RegIn_incl, theoryS, theoryL )
+
+contr_et <- read_csv("./stats/et_reading_measures_contrast_coded.csv", show_col_types = FALSE) %>%
+    filter(AOI_id == "R3") %>%
+  mutate(subj_id = as.character(subj_id),
+         item_id = as.character(item_id),
+         theoryS = if_else(type == "stim_adj", "internal", "external"),
+         theoryL = if_else(type == "stim_verb", "verb", "adj"))
+
+# View(contr_motr)
+# View(contr_et)
+```
+
+## model comparison
+```{r Get Bayes Factor, echo=TRUE, eval=FALSE, message=TRUE}
+# Note: this chunk takes about 18 hours to run!
+
+methods <- c("motr", "et") 
+measure_types <- c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl")
+
+results <- data.frame(
+  method = character(),
+  measure = character(),
+  prior_sd = numeric(),
+  BF = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (meth in methods) {
+  for (meas in measure_types) {
+    print(paste("Fitting model for:", meth, meas))
+    if (meth == "motr") {temp_data <- contr_motr} else {temp_data <- contr_et}
+    if (meas %in% c("gaze_duration", "go_past_time", "total_duration")) {
+
+      prior_sd <- c(0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1)
+      temp <- temp_data %>% filter(!is.na(.data[[meas]])) %>% mutate(log_value = log(.data[[meas]]))
+      
+        for (psd in prior_sd) {
+          # Fit the "synt" model
+          fit_synt <- brm(
+            log_value ~ 1 + Gram + Synt + Lex + Gram_x_Synt + 
+              (1 + Gram | item_id) + 
+              (1 + Gram | subj_id),
+            prior = c(
+              prior(normal(6, 1), class = Intercept),
+              prior(normal(0, 0.1), class = b, coef = Gram),
+              prior(normal(0, 0.1), class = b, coef = Synt),
+              prior(normal(0, 0.1), class = b, coef = Lex),
+              set_prior(paste0("normal(0,", psd, ")"), class = "b", coef = "Gram_x_Synt"),
+              prior(exponential(2), class = sigma),
+              prior(exponential(2), class = sd),
+              prior(lkj(2), class = cor)
+            ),
+            warmup = 2000,
+            iter = 20000,
+            control = list(adapt_delta = 0.9),
+            save_pars = save_pars(all = TRUE),
+            data = temp
+          )
+          margLogLik_synt <- bridge_sampler(fit_synt, silent = TRUE)
+
+          # Fit the "lex" model
+          fit_lex <- brm(
+            log_value ~ 1 + Gram + Synt + Lex + Gram_x_Lex + 
+              (1 + Gram | item_id) + 
+              (1 + Gram | subj_id),
+            prior = c(
+              prior(normal(6, 1), class = Intercept),
+              prior(normal(0, 0.1), class = b, coef = Gram),
+              prior(normal(0, 0.1), class = b, coef = Synt),
+              prior(normal(0, 0.1), class = b, coef = Lex),
+              set_prior(paste0("normal(0,", psd, ")"), class = "b", coef = "Gram_x_Lex"),
+              prior(exponential(2), class = sigma),
+              prior(exponential(2), class = sd),
+              prior(lkj(2), class = cor)
+            ),
+            warmup = 2000,
+            iter = 20000,
+            control = list(adapt_delta = 0.9),
+            save_pars = save_pars(all = TRUE),
+            data = temp
+          )
+          margLogLik_lex <- bridge_sampler(fit_lex, silent = TRUE)
+
+          # Calculate Bayes factor
+          bf <- bayes_factor(margLogLik_synt, margLogLik_lex)$bf
+
+          # Store results
+          results <- rbind(
+            results,
+            data.frame(method = meth, measure = meas, prior_sd = psd, BF = bf)
+          )
+        }
+      } else {
+      prior_sd <- c(0.01, 0.05, 0.1, 0.5, 1, 5, 10)
+      
+      temp <- temp_data %>% filter(!is.na(.data[[meas]])) %>% mutate(value = .data[[meas]])
+
+      for (psd in prior_sd) {
+        # Fit the "synt" model (logistic regression)
+        fitb_synt <- brm(
+          value ~ 1 + Gram + Synt + Lex + Gram_x_Synt + 
+            (1 + Gram | item_id) + 
+            (1 + Gram | subj_id),
+          family = bernoulli(link = "logit"), 
+          prior = c(
+            prior(normal(0, 1), class = Intercept),
+            prior(normal(0, 1), class = b, coef = Gram),
+            prior(normal(0, 1), class = b, coef = Synt),
+            prior(normal(0, 1), class = b, coef = Lex),
+            set_prior(paste0("normal(0,", psd, ")"), class = "b", coef = "Gram_x_Synt"),
+            prior(exponential(2), class = sd),
+            prior(lkj(2), class = cor)
+          ),
+          warmup = 2000,
+          iter = 20000,
+          control = list(adapt_delta = 0.9),
+          save_pars = save_pars(all = TRUE),
+          data = temp
+        )
+        margLogLik_synt <- bridge_sampler(fitb_synt, silent = TRUE)
+
+        # Fit the "lex" model (logistic regression)
+        fitb_lex <- brm(
+          value ~ 1 + Gram + Synt + Lex + Gram_x_Lex + 
+            (1 + Gram | item_id) + 
+            (1 + Gram | subj_id),
+          family = bernoulli(link = "logit"), 
+          prior = c(
+            prior(normal(0, 1), class = Intercept),
+            prior(normal(0, 1), class = b, coef = Gram),
+            prior(normal(0, 1), class = b, coef = Synt),
+            prior(normal(0, 1), class = b, coef = Lex),
+            set_prior(paste0("normal(0,", psd, ")"), class = "b", coef = "Gram_x_Lex"),
+            prior(exponential(2), class = sd),
+            prior(lkj(2), class = cor)
+          ),
+          warmup = 2000,
+          iter = 20000,
+          control = list(adapt_delta = 0.9),
+          save_pars = save_pars(all = TRUE),
+          data = temp
+        )
+        margLogLik_lex <- bridge_sampler(fitb_lex, silent = TRUE)
+
+        # Calculate Bayes factor
+        bf <- bayes_factor(margLogLik_synt, margLogLik_lex)$bf
+
+        # Store results
+        results <- rbind(
+          results,
+          data.frame(method = meth, measure = meas, prior_sd = psd, BF = bf)
+        )
+      }
+    }
+  }
+}
+
+# View(results)
+
+# write.csv(results, "BFs_results.csv", row.names = FALSE)
+
+```
+
+```{r Read BF results, echo=TRUE, eval=TRUE, message=TRUE}
+BF <- read_csv("./stats/BFs_results.csv", show_col_types = FALSE) %>% 
+  mutate(measure = factor(measure, levels = c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl"), labels=c("Gaze Duration", "Go Past Time", "Total Duration", "FPReg Prob.", "RegIn Prob.")),
+         method = factor(method, levels = c("et", "motr"), labels=c("Eye-tr.", "MoTR")),
+         prior_sd = round(prior_sd, 2))
+  
+(colnames(BF))
+```
+
+
+```{r PLOT RTs ,echo=TRUE, eval=TRUE, message=TRUE}
+BF %>% 
+  filter(measure %in% c("Gaze Duration", "Go Past Time", "Total Duration")) %>%
+  ggplot(aes(x = prior_sd, y = BF, color = measure, group = interaction(method, measure))) +
+  geom_hline(yintercept = 1, linetype = "solid", color = "black", linewidth = 1) + 
+  geom_vline(xintercept = 0.1, linetype = "dotted", linewidth = 1, color = "grey60") +
+  geom_line(aes(linetype = method), size = 1) + 
+  geom_point(aes(shape = method), size = 2.5) +  
+  scale_color_manual(
+    values = c(
+      "Gaze Duration" = "#F8766D",  
+      "Go Past Time" = "#00BFC4",  
+      "Total Duration" = "#7CAE00"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c("Eye-tr." = "dashed", "MoTR" = "solid") 
+  ) +
+  scale_shape_manual(
+    values = c("Eye-tr." = 17, "MoTR" = 16)
+  ) +
+  labs(
+    x = "Prior Standard Deviation",
+    y = "Bayes Factor",
+    color = "Measure",
+    linetype = "Method",
+    shape = "Method"
+  ) +
+  scale_y_continuous(
+    breaks = c(1/3, 1, 2, 3),  # Custom breaks
+    labels = c("1/3", "1", "2", "3"),  # Custom labels
+    limits = c(0, 4)  # Symmetric limits
+  ) +
+  theme_light() +
+  theme_minimal(base_size = 13) + 
+  theme(
+    legend.position = "none", 
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),  # Prominent outer frame
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.4),  
+    panel.grid.minor = element_blank(),         
+    axis.text = element_text(size = 13),        
+    axis.title = element_text(size = 13)  
+  ) +
+  annotate("text", x = 0.9, y = 3.8, label = "Evidence for GramxArgType Model",
+           hjust = 1.1, size = 5, color = "black") +  # fontface = "bold"
+  annotate("text", x = Inf, y = 0.25, label = "Evidence for GramxLexCat Model",
+           hjust = 1.1, size = 5, color = "black") 
+
+
+ggsave(paste0("./images/bf_rts.pdf"), device="pdf", height=5, width=5)
+```
+
+```{r PLOT binary, echo=TRUE, eval=TRUE, message=TRUE}
+BF %>% 
+  filter(measure %in% c("FPReg Prob.", "RegIn Prob.")) %>%
+  ggplot(aes(x = prior_sd, y = BF, color = measure, group = interaction(method, measure))) +
+  geom_hline(yintercept = 1, linetype = "solid", color = "black", linewidth = 1) + 
+  geom_vline(xintercept = 1, linetype = "dotted", linewidth = 1, color = "grey60") +
+  geom_line(aes(linetype = method), size = 1) +  
+  geom_point(aes(shape = method), size = 2.5) +  
+  scale_color_manual(
+    values = c(
+      "FPReg Prob." = "#9467BD",  
+      "RegIn Prob." ="#FF7F0E"  
+    )
+  ) +
+    scale_linetype_manual(
+    values = c("Eye-tr." = "dashed", "MoTR" = "solid")  
+  ) +
+  scale_shape_manual(
+    values = c("Eye-tr." = 17, "MoTR" = 16)  
+  ) +
+  labs(
+    x = "Prior Standard Deviation",
+    y = "Bayes Factor",
+    color = "Measure",
+    linetype = "Method",
+    shape = "Method"
+  ) +
+  scale_y_continuous(
+    breaks = c(1/3, 1, 3, 5),  
+    labels = c("1/3", "1", "3", "5"),  
+    limits = c(0, 5)  
+  ) +
+  theme_light() +
+  theme_minimal(base_size = 13) + 
+  theme(
+    legend.position = "none", 
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),  # Prominent outer frame
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.4),  
+    panel.grid.minor = element_blank(),         
+    axis.text = element_text(size = 13),        
+    axis.title = element_text(size = 13)  
+  ) +
+  annotate("text", x = 9, y = 4.8, label = "Evidence for GramxArgType Model",
+           hjust = 1.1, size = 5, color = "black") +  # fontface = "bold"
+  annotate("text", x = Inf, y = 0.25, label = "Evidence for GramxLexCat Model",
+           hjust = 1.1, size = 5, color = "black") 
+
+ggsave(paste0("./images/bf_regs.pdf"), device="pdf", height=5, width=5)
+
+```
+
+```{r PLOT for legend, echo=TRUE, eval=FALSE, message=TRUE}
+BF %>% 
+  ggplot(aes(x = prior_sd, y = BF, color = measure, group = interaction(method, measure))) +
+  geom_hline(yintercept = 1, linetype = "solid", color = "black", linewidth = 1) + 
+  geom_line(aes(linetype = method), size = 0.7) + 
+  geom_point(aes(shape = method), size = 1.5) +  
+  scale_color_manual(
+    values = c(
+      "Gaze Duration" = "#F8766D",  
+      "Go Past Time" = "#00BFC4",  
+      "Total Duration" = "#7CAE00",
+      "FPReg Prob." = "#9467BD",  
+      "RegIn Prob." ="#FF7F0E" 
+    )
+  ) +
+  scale_linetype_manual(
+    values = c("Eye-tr." = "dashed", "MoTR" = "solid") 
+  ) +
+  scale_shape_manual(
+    values = c("Eye-tr." = 17, "MoTR" = 16)
+  ) +
+  labs(
+    x = "Prior Standard Deviation",
+    y = "Bayes Factor",
+    color = "Measure",
+    linetype = "Method",
+    shape = "Method"
+  ) +
+  scale_y_continuous(
+    breaks = c(1/3, 1, 2, 3),  # Custom breaks
+    labels = c("1/3", "1", "2", "3"),  # Custom labels
+    limits = c(0, 4)  # Symmetric limits
+  ) +
+  theme_light() +
+  theme_minimal(base_size = 10) + 
+  theme(
+    legend.position = "right",
+    legend.box = "vertical",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),  # Prominent outer frame
+    panel.grid.major = element_line(color = "grey90", linewidth = 0.4),  
+    panel.grid.minor = element_blank(),         
+    axis.text = element_text(size = 13),        
+    axis.title = element_text(size = 13)  
+  ) +
+  annotate("text", x = 0.8, y = 3.8, label = "Evidence for GramxSynt Model",
+           hjust = 1.1, size = 5, color = "black") +  # fontface = "bold"
+  annotate("text", x = Inf, y = 0.25, label = "Evidence for GramxLex Model",
+           hjust = 1.1, size = 5, color = "black") 
+
+
+ggsave(paste0("./images/bf_legend.pdf"), device="pdf", height=5, width=5)
+```
+
