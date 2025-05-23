@@ -415,9 +415,8 @@ stats_freq = data.frame()
 # regions = c("R2", "R3", "R4", "R5")
 methods = c("motr", "et")
 regions = c("R3")
-measure_types = c("gaze_duration", "go_past_time", "total_duration",
-"FPReg", "RegIn_incl"
-)
+# measure_types = c("gaze_duration", "go_past_time", "total_duration","FPReg", "RegIn_incl")
+measure_types = c("gaze_duration")
 
 for (meth in methods) {
   for (region in regions) {
@@ -487,7 +486,7 @@ stats_freq <- stats_freq %>%
 
 # View(stats_freq)
 
-# write.csv(stats_freq, "./stats/stats_motr_et_lmer.csv", row.names = FALSE)
+write.csv(stats_freq, "./stats/stats_motr_et_lmer.csv", row.names = FALSE)
 
 ```
 
@@ -527,7 +526,7 @@ createStanData <-function(d, dv,form){
 methods = c("motr", "et")
 regions <- c("R3")
 measure_types <- c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl")
-# measure_types <- c("go_past_time")
+# measure_types <- c("gaze_duration")
 
 for (meth in methods) {
   for (region in regions) {
@@ -582,12 +581,13 @@ for (meth in methods) {
 ```{r Model_examination, echo=TRUE, eval=False}
 # change xx.rds to other models to check them
 region <- "R3"
-meas <- "go_past_time"
+meas <- "gaze_duration"
 
-model_path <- paste0("models/et_", meas, "_", region, ".rds")
+model_path <- paste0("models/motr_", meas, "_", region, ".rds")
 m1_gd <- readRDS(model_path)
 
 summary(m1_gd)
+print(summary(m1_gd))
 # check params
 summary(m1_gd, pars = c('beta[1]', 'beta[2]', 'beta[3]', 'beta[4]', 'beta[5]', 'beta[6]', 'beta[7]', 'beta[8]', 'beta[9]'))
 
@@ -667,6 +667,7 @@ stats_df <- data.frame()
 methods = c("motr", "et")
 regions <- c("R3")
 measure_types <- c("gaze_duration", "go_past_time", "total_duration", "FPReg", "RegIn_incl")
+# measure_types <- c("gaze_duration")
 
 for (meth in methods) {
   # Loop over each measure type to read the corresponding model and extract data
@@ -724,7 +725,7 @@ stats_df <- stats_df %>%
                     " [", round(crI_95_lower, 2), ", ", 
                     round(crI_95_upper, 2), "]")
   )
-write.csv(stats_df, "./stats/stats_bayesian.csv", row.names = FALSE)
+# write.csv(stats_df, "./stats/stats_bayesian.csv", row.names = FALSE)
 ```
 
 
